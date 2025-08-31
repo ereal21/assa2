@@ -11,6 +11,8 @@ from bot.database.methods import (
     get_item_values,
     get_item_value_by_id,
     buy_item,
+    select_item_values_amount,
+    get_item_info,
 )
 from bot.database.models import Permission
 from bot.handlers.other import get_bot_user_ids
@@ -30,6 +32,21 @@ async def view_stock_callback_handler(call: CallbackQuery):
     role = check_role(user_id)
     if role & Permission.OWN:
         categories = get_all_category_names()
+        lines = ['📋 Stock list']
+        for category in categories:
+            lines.append(f"\n<b>{category}</b>")
+            for sub in get_all_subcategories(category):
+                lines.append(f"  {sub}")
+                for item in get_all_item_names(sub):
+                    info = get_item_info(item)
+                    count = select_item_values_amount(item)
+                    lines.append(f"    • {display_name(item)} ({info['price']:.2f}€, {count})")
+            for item in get_all_item_names(category):
+                info = get_item_info(item)
+                count = select_item_values_amount(item)
+                lines.append(f"  • {display_name(item)} ({info['price']:.2f}€, {count})")
+        text = '\n'.join(lines)
+        await bot.send_message(call.message.chat.id, text, parse_mode='HTML')
         await bot.edit_message_text(
             '📦 Choose category',
             chat_id=call.message.chat.id,
@@ -101,8 +118,19 @@ async def view_stock_value_handler(call: CallbackQuery):
         await call.answer('Not found')
         return
     if value['value'] and os.path.isfile(value['value']):
+        desc = ''
+        desc_file = f"{value['value']}.txt"
+        if os.path.isfile(desc_file):
+            with open(desc_file) as f:
+                desc = f.read()
         with open(value['value'], 'rb') as doc:
-            await bot.send_document(user_id, doc)
+            file_lower = value['value'].lower()
+            if file_lower.endswith('.mp4'):
+                await bot.send_video(user_id, doc, caption=desc or None)
+            elif file_lower.endswith(('.jpg', '.jpeg', '.png', '.gif')):
+                await bot.send_photo(user_id, doc, caption=desc or None)
+            else:
+                await bot.send_document(user_id, doc, caption=desc or None)
     else:
         await bot.send_message(user_id, value['value'])
     await bot.edit_message_text(

@@ -36,15 +36,19 @@ from bot.misc import TgConfig, EnvKeys
 from bot.misc.payment import quick_pay, check_payment_status
 from bot.misc.nowpayments import create_payment, check_payment
 from bot.utils import display_name
+from bot.utils.level import get_level_info
 
 
 def build_menu_text(user_obj, balance: float, purchases: int, lang: str) -> str:
-    """Return main menu text. Greeting remains in English regardless of language."""
+    """Return main menu text with loyalty status."""
     mention = f"<a href='tg://user?id={user_obj.id}'>{html.escape(user_obj.full_name)}</a>"
+    level_name, _, progress_bar, battery = get_level_info(purchases)
+    status = f"👤 Status: {level_name} [{progress_bar}] {battery}"
     return (
         f"{t(lang, 'hello', user=mention)}\n"
         f"{t(lang, 'balance', balance=f'{balance:.2f}')}\n"
-        f"{t(lang, 'total_purchases', count=purchases)}\n\n"
+        f"{t(lang, 'total_purchases', count=purchases)}\n"
+        f"{status}\n\n"
         f"{t(lang, 'note')}"
     )
 
@@ -544,11 +548,14 @@ async def item_info_callback_handler(call: CallbackQuery):
     item_info_list = get_item_info(item_name)
     category = item_info_list['category_name']
     lang = get_user_language(user_id) or 'en'
+    purchases = select_user_items(user_id)
+    _, discount, _, _ = get_level_info(purchases)
+    price = round(item_info_list["price"] * (100 - discount) / 100, 2)
     markup = item_info(item_name, category, lang)
     await bot.edit_message_text(
         f'🏪 Item {display_name(item_name)}\n'
         f'Description: {item_info_list["description"]}\n'
-        f'Price - {item_info_list["price"]}€',
+        f'Price - {price}€',
         chat_id=call.message.chat.id,
         message_id=call.message.message_id,
         reply_markup=markup)
@@ -570,7 +577,9 @@ async def confirm_buy_callback_handler(call: CallbackQuery):
     if not info:
         await call.answer('❌ Item not found', show_alert=True)
         return
-    price = info['price']
+    purchases = select_user_items(user_id)
+    _, discount, _, _ = get_level_info(purchases)
+    price = round(info['price'] * (100 - discount) / 100, 2)
     lang = get_user_language(user_id) or 'en'
     TgConfig.STATE[user_id] = None
     TgConfig.STATE[f'{user_id}_pending_item'] = item_name
@@ -629,6 +638,7 @@ async def buy_item_callback_handler(call: CallbackQuery):
     item_info_list = get_item_info(item_name)
     item_price = TgConfig.STATE.get(f'{user_id}_price', item_info_list["price"])
     user_balance = get_user_balance(user_id)
+    purchases_before = select_user_items(user_id)
 
     if user_balance >= item_price:
         value_data = get_item_value(item_name)
@@ -637,11 +647,20 @@ async def buy_item_callback_handler(call: CallbackQuery):
             # remove from stock immediately
             buy_item(value_data['id'], value_data['is_infinity'])
 
-            current_time = datetime.datetime.now()
+            current_time = datetime.datetime.utcnow() + datetime.timedelta(hours=3)
             formatted_time = current_time.strftime("%Y-%m-%d %H:%M:%S")
             new_balance = buy_item_for_balance(user_id, item_price)
             add_bought_item(value_data['item_name'], value_data['value'], item_price, user_id, formatted_time)
-            purchases = select_user_items(user_id)
+            purchases = purchases_before + 1
+            level_before, _, _, _ = get_level_info(purchases_before)
+            level_after, discount, _, _ = get_level_info(purchases)
+            if level_after != level_before:
+                msg_text = (
+                    f"🎉 Congratulations! You reached {level_after} and received a {discount:.1f}% discount for future purchases.\n\n"
+                    f"🎉 Поздравляем! Вы достигли уровня {level_after} и получили скидку {discount:.1f}% на все будущие покупки.\n\n"
+                    f"🎉 Sveikiname! Pasiekėte {level_after} ir gavote {discount:.1f}% nuolaidą visiems būsimiesiems pirkiniams."
+                )
+                await bot.send_message(user_id, msg_text)
 
             if os.path.isfile(value_data['value']):
                 desc = ''
@@ -690,9 +709,16 @@ async def buy_item_callback_handler(call: CallbackQuery):
                     cleanup_item_file(desc_file)
 
                 username = f'@{call.from_user.username}' if call.from_user.username else call.from_user.full_name
-                admin_caption = f'User {username} purchased {value_data["item_name"]} for {item_price}€'
-                if desc:
-                    admin_caption += f'\n\n{desc}'
+                parent_cat = get_category_parent(item_info_list['category_name'])
+                admin_caption = (
+                    f"User {username}\n"
+                    f"Time: {formatted_time} GMT+3\n"
+                    f"Product: {value_data['item_name']} ({item_price}€)\n"
+                    f"Crypto: N/A\n"
+                    f"Category: {parent_cat or '-'} / {item_info_list['category_name']}\n"
+                    f"Description: {desc or '-'}\n"
+                    f"File: {sold_path}"
+                )
                 with open(sold_path, 'rb') as admin_media:
                     if sold_path.endswith('.mp4'):
                         await bot.send_video(EnvKeys.OWNER_ID, admin_media, caption=admin_caption, parse_mode='HTML')
